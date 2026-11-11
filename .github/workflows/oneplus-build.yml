@@ -1082,6 +1082,10 @@ jobs:
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS_POSIX_ACL=y
           CONFIG_HEADERS_INSTALL=n
+          CONFIG_BTRFS_FS=m
+          CONFIG_BTRFS_FS_POSIX_ACL=y
+          CONFIG_BTRFS_ASSERT=n
+          CONFIG_BTRFS_DEBUG=n
           EOF
 
           kpm_config_supported="false"
@@ -1231,6 +1235,14 @@ jobs:
               make -j"$(nproc --all)" LLVM_IAS=1 LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out "${KSU_KCFLAGS[@]}" gki_defconfig all
               ;;
           esac
+
+          # btrfs 以模块方式构建时，确保模块阶段完成（all 已包含模块则跳过）
+          if [ -f out/.config ] && grep -qx 'CONFIG_BTRFS_FS=m' out/.config; then
+            if [ ! -f out/fs/btrfs/btrfs.ko ]; then
+              echo "显式编译模块阶段以产出 btrfs.ko"
+              "${MAKE_COMMON[@]}" modules || echo "::warning::模块阶段编译失败"
+            fi
+          fi
           ccache -s
 
       - name: 打包 AnyKernel3
@@ -1249,6 +1261,17 @@ jobs:
           fi
           cp "$IMAGE_PATH" AnyKernel3/Image
           cp "$IMAGE_PATH" Image
+
+          # 保留 btrfs 模块（CONFIG_BTRFS_FS=m），供 insmod 测试
+          KO_PATH="$(find "$WORKSPACE/kernel_workspace/kernel_platform/common/out" -name 'btrfs.ko' 2>/dev/null | head -n 1)"
+          if [ -n "$KO_PATH" ]; then
+            cp "$KO_PATH" "$WORKSPACE/btrfs.ko"
+            echo "已提取 btrfs.ko: $KO_PATH"
+            file "$WORKSPACE/btrfs.ko" 2>/dev/null || true
+            strings "$WORKSPACE/btrfs.ko" | grep -m1 -i vermagic || true
+          else
+            echo "::warning::编译产物中未找到 btrfs.ko"
+          fi
 
           if [ "$EFFECTIVE_KPM" = "true" ]; then
             mkdir -p kpm_patch_temp
@@ -1298,4 +1321,11 @@ jobs:
         with:
           name: ${{ env.ONEPLUS_IMAGE_ARTIFACT_NAME }}
           path: oneplus_workspace/Image
+          if-no-files-found: warn
+
+      - name: 上传 btrfs 模块
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.ONEPLUS_IMAGE_ARTIFACT_NAME }}_btrfs-ko
+          path: oneplus_workspace/btrfs.ko
           if-no-files-found: warn
