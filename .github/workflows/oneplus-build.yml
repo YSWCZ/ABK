@@ -265,8 +265,17 @@ jobs:
           apt_update_retry
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends \
             python3 git curl ccache libelf-dev libdw-dev build-essential flex bison libssl-dev \
-            libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip gawk \
+            libncurses-dev zlib1g-dev libxml2-utils rsync unzip gawk \
             dos2unix zip gcc-aarch64-linux-gnu
+          # 压缩工具：新版 Ubuntu 已移除 liblz4-tool（过渡包），按可用性择一安装，避免整步失败
+          for pkg in lz4 liblz4-tool; do
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends "$pkg"; then
+              echo "已安装压缩工具包: $pkg"
+              break
+            fi
+            echo "::warning::$pkg 不可用，尝试下一个候选"
+          done
+          command -v lz4 >/dev/null 2>&1 || echo "::warning::未找到 lz4 命令（仅影响 lz4 压缩镜像，btrfs 构建不受影响）"
           if ! command -v repo >/dev/null 2>&1; then
             curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o repo
             chmod a+x repo
