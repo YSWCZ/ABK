@@ -1194,6 +1194,27 @@ jobs:
           fi
           sed -i 's/check_defconfig//' "$COMMON_ROOT/build.config.gki" || true
 
+      - name: 修补宿主机工具 -Werror 告警
+        shell: bash
+        run: |
+          set -euo pipefail
+          COMMON_ROOT="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform/common"
+          test -d "$COMMON_ROOT/tools"
+          # 新版 clang 把“丢弃 const 限定符”“函数指针类型不兼容”纳入默认告警组，
+          # 而树内自带的旧 libbpf/libsubcmd 用 -Werror 编译，会直接失败（与内核本体无关）。
+          # 在这些工具的 Makefile 里就地降级为告警，不关闭其余 -Werror。
+          flags="-Wno-incompatible-pointer-types-discards-qualifiers -Wno-incompatible-function-pointer-types"
+          patched=0
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if grep -q -- "-Werror" "$f"; then
+              sed -i "/-Werror/ s|\$| $flags|" "$f"
+              patched=$((patched + 1))
+            fi
+          done <<< "$(grep -RIl -- '-Werror' "$COMMON_ROOT/tools" --include='Makefile*' --include='*.mk' 2>/dev/null || true)"
+          echo "已降级宿主机工具 -Werror 的文件数: $patched"
+          grep -n -- "-Werror.*Wno-incompatible" "$COMMON_ROOT/tools/lib/bpf/Makefile" || true
+
       - name: 编译内核
         shell: bash
         run: |
