@@ -359,7 +359,14 @@ jobs:
             cd "$KERNEL_ROOT"
             case "$KSU_VARIANT" in
               Official)
-                curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
+                # SUSFS 官方要求：KernelSU 必须用 tag/release tag，不能用 main HEAD。
+                # main HEAD 上 init.c/selinux_hide.c 等结构已变，SUSFS 补丁会大面积 reject，
+                # 产生半截代码（ksu_late_loaded 等未声明）导致编译失败。
+                KSU_REF="${ABK_KSU_TAG:-v3.3.1}"
+                echo "KernelSU 将检出 $KSU_REF（release tag，而非 main HEAD）"
+                curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s "$KSU_REF"
+                cd "$KERNEL_ROOT/KernelSU" && git describe --tags 2>/dev/null || true
+                cd "$KERNEL_ROOT"
                 ;;
               SukiSU)
                 curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s builtin
@@ -1220,7 +1227,14 @@ jobs:
                 if patch -p1 --forward < 10_enable_susfs_for_ksu.patch; then
                   echo "已为 KernelSU 打入 SUSFS 支持补丁"
                 else
-                  echo "::warning::KernelSU SUSFS 补丁未能完全应用，SUSFS 可能不可用"
+                  echo "::error::KernelSU SUSFS 补丁未能完全应用（KSU 版本与 SUSFS 不匹配）"
+                fi
+                # 半截补丁会编出引用不存在符号的代码，必须显式失败而不是继续
+                if find . -name '*.rej' -print -quit | grep -q .; then
+                  echo "::error::SUSFS 补丁存在 reject，KernelSU 版本与 SUSFS 补丁不匹配:"
+                  find . -name '*.rej' -exec echo "  {}" \;
+                  echo "请把 ABK_KSU_TAG 调整为 SUSFS 适配的 release tag"
+                  exit 1
                 fi
                 cd "$WORKSPACE"
               else
