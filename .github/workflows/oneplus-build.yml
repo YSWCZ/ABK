@@ -1448,6 +1448,30 @@ jobs:
           enable_cfg CONFIG_NTSYNC
 
           echo "文件系统补充:"
+          for c in CONFIG_XFS_FS CONFIG_NILFS2_FS CONFIG_NTFS3_FS CONFIG_BLK_DEV_NBD CONFIG_BLK_DEV_LOOP \
+                   CONFIG_SQUASHFS CONFIG_SQUASHFS_XZ CONFIG_SQUASHFS_ZSTD CONFIG_SQUASHFS_LZO \
+                   CONFIG_SQUASHFS_LZ4 CONFIG_SQUASHFS_XATTR CONFIG_ISO9660_FS CONFIG_UDF_FS \
+                   CONFIG_9P_FS CONFIG_9P_FS_POSIX_ACL CONFIG_NFS_FS CONFIG_NFS_V4 CONFIG_NFS_V4_1 \
+                   CONFIG_CIFS CONFIG_NLS_UTF8 CONFIG_NLS_ISO8859_1; do
+            enable_cfg "$c"
+          done
+
+          echo "容器运行时补充（资源与检查点）:"
+          for c in CONFIG_CGROUP_DEVICE CONFIG_CGROUP_HUGETLB CONFIG_CGROUP_NET_CLASSID \
+                   CONFIG_CGROUP_RDMA CONFIG_CHECKPOINT_RESTORE CONFIG_KCMP CONFIG_PSI \
+                   CONFIG_BLK_CGROUP CONFIG_BLK_DEV_THROTTLING CONFIG_ZSWAP CONFIG_ZBUD \
+                   CONFIG_Z3FOLD CONFIG_ZSMALLOC CONFIG_MEMCG_SWAP_ENABLED; do
+            enable_cfg "$c"
+          done
+
+          echo "网络增强（容器/服务端）:"
+          for c in CONFIG_NET_SCHED CONFIG_NET_CLS_ACT CONFIG_NET_SCH_HTB CONFIG_NET_SCH_CAKE \
+                   CONFIG_NET_SCH_FQ_CODEL CONFIG_NET_CLS_FW CONFIG_NET_CLS_U32 CONFIG_NET_CLS_BPF \
+                   CONFIG_NF_TABLES_INET CONFIG_NF_TABLES_NETDEV CONFIG_NFT_CT CONFIG_NFT_NAT \
+                   CONFIG_NFT_MASQ CONFIG_NFT_REDIR CONFIG_WIREGUARD CONFIG_IP_ADVANCED_ROUTER \
+                   CONFIG_IP_MULTIPLE_TABLES CONFIG_NETFILTER_NETLINK_LOG; do
+            enable_cfg "$c"
+          done
           for c in CONFIG_XFS_FS CONFIG_NILFS2_FS CONFIG_NTFS3_FS CONFIG_BLK_DEV_NBD CONFIG_BLK_DEV_LOOP; do
             enable_cfg "$c"
           done
@@ -1509,7 +1533,7 @@ jobs:
               "KCFLAGS+=-I$KERNEL_ROOT/KernelSU/kernel/include"
             )
           fi
-          MAKE_COMMON=(make -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out "${KSU_KCFLAGS[@]}")
+          MAKE_COMMON=(make -j"$(nproc --all)" LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole LD=ld.lld HOSTLD=ld.lld O=out "${KSU_KCFLAGS[@]}" "KCFLAGS+=-Wno-incompatible-function-pointer-types")
           case "$KERNEL_VERSION" in
             6.1)
               export KBUILD_BUILD_TIMESTAMP="Tue Mar 10 03:53:33 UTC 2026"
