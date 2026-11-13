@@ -1091,7 +1091,7 @@ jobs:
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS_POSIX_ACL=y
           CONFIG_HEADERS_INSTALL=n
-          CONFIG_BTRFS_FS=m
+          CONFIG_BTRFS_FS=y
           CONFIG_BTRFS_FS_POSIX_ACL=y
           CONFIG_BTRFS_ASSERT=n
           CONFIG_BTRFS_DEBUG=n
