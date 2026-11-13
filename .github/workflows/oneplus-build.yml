@@ -1419,9 +1419,18 @@ jobs:
                    CONFIG_IP6_NF_TARGET_REJECT CONFIG_NETFILTER_XT_TARGET_LOG \
                    CONFIG_NETFILTER_XT_MATCH_RECENT CONFIG_IP_SET CONFIG_IP_SET_HASH_IP \
                    CONFIG_IP_SET_HASH_NET CONFIG_NETFILTER_XT_SET \
-                   CONFIG_TMPFS_POSIX_ACL CONFIG_TMPFS_XATTR CONFIG_FANOTIFY; do
+                   CONFIG_TMPFS_POSIX_ACL CONFIG_TMPFS_XATTR; do
             enable_cfg "$c"
           done
+
+          echo "文件事件通知（fanotify 全套）:"
+          # FANOTIFY 是总开关；ACCESS_PERMISSIONS 才提供 FAN_OPEN_PERM 等
+          # 权限类事件（防病毒/HSM 那类监听器依赖它），缺了只剩事后通知。
+          for c in CONFIG_FANOTIFY CONFIG_FANOTIFY_ACCESS_PERMISSIONS CONFIG_FSNOTIFY \
+                   CONFIG_INOTIFY_USER CONFIG_DNOTIFY; do
+            enable_cfg "$c"
+          done
+          echo "  (FANOTIFY 依赖 EXPORTFS/SECURITY，两者若未启用会由 select 自动带上)"
 
           echo "kexec 内核交接:"
           for c in CONFIG_KEXEC CONFIG_KEXEC_FILE CONFIG_KEXEC_SIG CONFIG_CRYPTO_SHA256; do
