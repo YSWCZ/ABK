@@ -316,6 +316,13 @@ if [ "$KSU_BRANCH" = "Custom(自定义)" ]; then
   fi
 fi
 
+# 直接把 release tag（如 v3.3.1）当分支名传入时，按该 tag 取源码与管理器。
+# 内核侧与 get-manager 都 checkout 同一 tag，避免 SUSFS 补丁因 main HEAD 漂移而 reject。
+if [[ "$KSU_BRANCH" =~ ^[Vv]?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  OFFICIAL_REF="$KSU_BRANCH"
+  SUKISU_REF="$KSU_BRANCH"
+  BAKASU_REF="$KSU_BRANCH"
+else
 case "$KSU_BRANCH" in
   "Stable(标准)")
     OFFICIAL_REF="$OFFICIAL_STABLE_REF"
@@ -343,6 +350,7 @@ case "$KSU_BRANCH" in
     exit 1
     ;;
 esac
+fi
 
 case "$KSU_VARIANT" in
   Official)

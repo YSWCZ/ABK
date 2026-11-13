@@ -143,6 +143,9 @@ jobs:
     secrets: inherit
     with:
       kernelsu_variant: ${{ inputs.ksu_variant }}
+      # 必须与内核侧使用的 KSU release tag 一致，否则管理器版本号低于内核版本，
+      # KernelSU 会判定管理器过旧并限制功能（例如内核 32680 而管理器 32653）。
+      ksu_branch: ${{ inputs.ksu_variant == 'Official' && 'v3.3.1' || 'Stable(标准)' }}
 
   build-oneplus-kernel:
     name: "${{ inputs.device_manifest }}-${{ inputs.kernel_version }}-${{ inputs.ksu_variant }}"
