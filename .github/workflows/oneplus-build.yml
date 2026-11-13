@@ -1231,36 +1231,58 @@ jobs:
             fi
           fi
 
-          # ---------------- 2. Droidspaces 容器支持（含 SYSVIPC kABI 修复） ----------------
-          # 直接开启 CONFIG_SYSVIPC 会给 task_struct 增加字段、整体位移 ABI，
-          # 厂商预编译模块的 CRC 随即失配并导致 bootloop，因此必须先打 kABI 补丁。
+          # ---------------- 2. sm8750 专供容器/ABI 补丁（cctv18） ----------------
+          # 这份补丁集与设备现有内核同源，处理三件上游没有的事：
+          #   a) 放行 f2fs 这类 casefold-capable 底层上的 overlayfs（否则 lowerdir 直接被拒）
+          #   b) 容忍模块 CRC 不一致，使按 6.6.89 编译的厂商模块能在新内核上加载
+          #   c) 补齐 netns/nf_tables/cgroup 的 KABI 兼容
+          SM8750_REPO="$WORKSPACE/oppo_oplus_realme_sm8750"
+          SM8750_REF="${ABK_SM8750_REF:-1f68e2c058416a79dcdc5f5052000d8b7d3e7d36}"
+          rm -rf "$SM8750_REPO"
+          if timeout 300 git clone https://github.com/cctv18/oppo_oplus_realme_sm8750.git "$SM8750_REPO" 2>&1 | tail -2; then
+            git -C "$SM8750_REPO" checkout -q "$SM8750_REF" 2>/dev/null && echo "已切到 $SM8750_REF" || echo "::warning::无法切到指定提交，改用默认分支"
+          else
+            echo "::warning::拉取 sm8750 补丁仓库失败"
+          fi
+
+          apply_patch_safe() {
+            local p="$1"; local label="$2"
+            if [ ! -f "$p" ]; then echo "::warning::补丁不存在: $label"; return 1; fi
+            if patch -p1 --forward --dry-run < "$p" >/dev/null 2>&1; then
+              patch -p1 --forward < "$p" >/dev/null && { echo "已应用: $label"; return 0; }
+            fi
+            echo "::warning::$label 未能干净应用（上下文可能已变化）"
+            return 1
+          }
+
+          # 上游 Droidspaces-OSS 作为 kABI 补丁的备选来源（按 tag 钉版）
           DS_DIR="$WORKSPACE/Droidspaces-OSS"
           rm -rf "$DS_DIR"
           if timeout 300 git clone --depth 1 --branch "$DROIDSPACES_REF" \
-              https://github.com/ravindu644/Droidspaces-OSS.git "$DS_DIR"; then
+              https://github.com/ravindu644/Droidspaces-OSS.git "$DS_DIR" >/dev/null 2>&1; then
             echo "已检出 Droidspaces-OSS@$DROIDSPACES_REF"
           else
-            echo "::warning::拉取 Droidspaces-OSS 失败，改用内置 kABI 改写"
+            echo "::warning::拉取 Droidspaces-OSS 失败，仅使用 sm8750 专用补丁"
             rm -rf "$DS_DIR"
           fi
 
           cd "$COMMON_ROOT"
+
+          # 2a. SYSVIPC kABI（优先用 sm8750 专用补丁，其次上游，最后就地改写）
           SCHED="$COMMON_ROOT/include/linux/sched.h"
           test -f "$SCHED" || { echo "::error::缺少 $SCHED"; exit 1; }
-
           if grep -qF 'ANDROID_KABI_USE(6, struct sysv_sem sysvsem);' "$SCHED"; then
-            echo "SYSVIPC kABI 补丁已存在"
+            echo "SYSVIPC kABI 已就位"
           else
-            applied_slot_patch="false"
-            if [ -d "$DS_DIR" ]; then
-              PK="$DS_DIR/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch"
-              if [ -f "$PK" ] && patch -p1 --forward --dry-run < "$PK" >/dev/null 2>&1; then
-                patch -p1 --forward < "$PK"
-                applied_slot_patch="true"
-                echo "已应用上游 SYSVIPC kABI 补丁 (slot 6/7/8)"
+            applied="false"
+            for cand in \
+              "$SM8750_REPO/droidspaces_patch/fix_sysvipc_kabi_6_7_8.patch" \
+              "$WORKSPACE/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch"; do
+              if [ -f "$cand" ] && patch -p1 --forward --dry-run < "$cand" >/dev/null 2>&1; then
+                patch -p1 --forward < "$cand" >/dev/null && { applied="true"; echo "已应用 SYSVIPC kABI: $(basename "$cand")"; break; }
               fi
-            fi
-            if [ "$applied_slot_patch" != "true" ]; then
+            done
+            if [ "$applied" != "true" ]; then
               python3 - "$SCHED" <<'PY'
           import re
           import sys
@@ -1315,6 +1337,30 @@ jobs:
             fi
             grep -qF 'ANDROID_KABI_USE(6, struct sysv_sem sysvsem);' "$SCHED" \
               || { echo "::error::SYSVIPC kABI 改写失败"; exit 1; }
+          fi
+
+          # 2b. overlayfs 完整性 + 模块校验放宽 + netns/nftables/cgroup KABI
+          cd "$COMMON_ROOT"
+          if grep -qF 'ofs->config.userxattr = true;' fs/overlayfs/params.c 2>/dev/null; then
+            echo "overlayfs casefold 放行补丁已存在"
+          else
+            apply_patch_safe "$SM8750_REPO/droidspaces_patch/Kernel_6.6.patch" "Kernel_6.6.patch (overlayfs/KABI)" || true
+          fi
+          if grep -qF 'ofs->config.userxattr = true;' fs/overlayfs/params.c 2>/dev/null; then
+            echo "overlayfs: f2fs casefold 底层现在可用于 lowerdir/upperdir"
+          else
+            echo "::warning::overlayfs casefold 放行未生效，/data 作为 overlay 底层仍会被拒绝"
+          fi
+
+          # 2c. ntsync（Windows NT 同步原语，供容器内 Wine/Proton 使用）
+          if [ "$KERNEL_VERSION" = "6.6" ]; then
+            if [ -f drivers/misc/ntsync.c ]; then
+              echo "ntsync 已存在"
+            else
+              if apply_patch_safe "$SM8750_REPO/droidspaces_patch/ntsync_base.patch" "ntsync_base.patch"; then
+                apply_patch_safe "$SM8750_REPO/droidspaces_patch/ntsync_compat_android15-6.6.patch" "ntsync_compat (android15-6.6)" || true
+              fi
+            fi
           fi
 
           # ---------------- 3. 写入内核配置 ----------------
@@ -1381,6 +1427,16 @@ jobs:
           for c in CONFIG_KEXEC CONFIG_KEXEC_FILE CONFIG_KEXEC_SIG CONFIG_CRYPTO_SHA256; do
             enable_cfg "$c"
           done
+
+          echo "overlayfs 完整性（默认值，缺省时由 mount 选项覆盖）:"
+          for c in CONFIG_OVERLAY_FS CONFIG_OVERLAY_FS_INDEX CONFIG_OVERLAY_FS_METACOPY \
+                   CONFIG_OVERLAY_FS_REDIRECT_DIR CONFIG_OVERLAY_FS_XINO_AUTO \
+                   CONFIG_OVERLAY_FS_NFS_EXPORT; do
+            enable_cfg "$c"
+          done
+
+          echo "ntsync（容器内 Wine/Proton 同步原语）:"
+          enable_cfg CONFIG_NTSYNC
 
           echo "文件系统补充:"
           for c in CONFIG_XFS_FS CONFIG_NILFS2_FS CONFIG_NTFS3_FS CONFIG_BLK_DEV_NBD CONFIG_BLK_DEV_LOOP; do
