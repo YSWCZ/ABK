@@ -1194,6 +1194,213 @@ jobs:
           fi
           sed -i 's/check_defconfig//' "$COMMON_ROOT/build.config.gki" || true
 
+      - name: 集成容器与标准内核特性
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKSPACE="$GITHUB_WORKSPACE/oneplus_workspace"
+          KERNEL_ROOT="$WORKSPACE/kernel_workspace/kernel_platform"
+          COMMON_ROOT="$KERNEL_ROOT/common"
+          DEFCONFIG_PATH="$COMMON_ROOT/arch/arm64/configs/gki_defconfig"
+          DROIDSPACES_REF="${ABK_DROIDSPACES_REF:-v7.2.0}"
+
+          # ---------------- 1. SUSFS 接入 KernelSU 源码树 ----------------
+          # KernelSU 本体不自带 CONFIG_KSU_SUSFS，必须打 susfs4oki 的 KernelSU 侧补丁，
+          # 否则 defconfig 里的 CONFIG_KSU_SUSFS=y 会被 kconfig 静默丢弃。
+          if [ "${EFFECTIVE_ENABLE_SUSFS:-false}" = "true" ] && [ "${KSU_VARIANT:-None}" = "Official" ]; then
+            if [ -d "$KERNEL_ROOT/KernelSU" ]; then
+              PATCH_SRC="$WORKSPACE/susfs4oki/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
+              if [ -f "$PATCH_SRC" ]; then
+                cp "$PATCH_SRC" "$KERNEL_ROOT/KernelSU/10_enable_susfs_for_ksu.patch"
+                cd "$KERNEL_ROOT/KernelSU"
+                if grep -q '^diff --git a/kernel/Makefile b/kernel/Makefile' ./10_enable_susfs_for_ksu.patch \
+                  && ! grep -q '^diff --git a/kernel/Kbuild b/kernel/Kbuild' ./10_enable_susfs_for_ksu.patch; then
+                  sed -i 's|kernel/Makefile|kernel/Kbuild|g' ./10_enable_susfs_for_ksu.patch
+                fi
+                if patch -p1 --forward < 10_enable_susfs_for_ksu.patch; then
+                  echo "已为 KernelSU 打入 SUSFS 支持补丁"
+                else
+                  echo "::warning::KernelSU SUSFS 补丁未能完全应用，SUSFS 可能不可用"
+                fi
+                cd "$WORKSPACE"
+              else
+                echo "::warning::未找到 susfs4oki 的 KernelSU SUSFS 补丁"
+              fi
+            else
+              echo "::warning::未找到 KernelSU 源码目录，跳过 SUSFS 接入"
+            fi
+          fi
+
+          # ---------------- 2. Droidspaces 容器支持（含 SYSVIPC kABI 修复） ----------------
+          # 直接开启 CONFIG_SYSVIPC 会给 task_struct 增加字段、整体位移 ABI，
+          # 厂商预编译模块的 CRC 随即失配并导致 bootloop，因此必须先打 kABI 补丁。
+          DS_DIR="$WORKSPACE/Droidspaces-OSS"
+          rm -rf "$DS_DIR"
+          if timeout 300 git clone --depth 1 --branch "$DROIDSPACES_REF" \
+              https://github.com/ravindu644/Droidspaces-OSS.git "$DS_DIR"; then
+            echo "已检出 Droidspaces-OSS@$DROIDSPACES_REF"
+          else
+            echo "::warning::拉取 Droidspaces-OSS 失败，改用内置 kABI 改写"
+            rm -rf "$DS_DIR"
+          fi
+
+          cd "$COMMON_ROOT"
+          SCHED="$COMMON_ROOT/include/linux/sched.h"
+          test -f "$SCHED" || { echo "::error::缺少 $SCHED"; exit 1; }
+
+          if grep -qF 'ANDROID_KABI_USE(6, struct sysv_sem sysvsem);' "$SCHED"; then
+            echo "SYSVIPC kABI 补丁已存在"
+          else
+            applied_slot_patch="false"
+            if [ -d "$DS_DIR" ]; then
+              PK="$DS_DIR/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch"
+              if [ -f "$PK" ] && patch -p1 --forward --dry-run < "$PK" >/dev/null 2>&1; then
+                patch -p1 --forward < "$PK"
+                applied_slot_patch="true"
+                echo "已应用上游 SYSVIPC kABI 补丁 (slot 6/7/8)"
+              fi
+            fi
+            if [ "$applied_slot_patch" != "true" ]; then
+              python3 - "$SCHED" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          sched = Path(sys.argv[1])
+          text = sched.read_text()
+
+          # 1) 注释掉 stock 的 sysvsem/sysvshm 字段（空白用正则容忍）
+          fields_re = re.compile(
+              r"#ifdef CONFIG_SYSVIPC\n"
+              r"\tstruct sysv_sem[ \t]+sysvsem;\n"
+              r"\tstruct sysv_shm[ \t]+sysvshm;\n"
+              r"#endif"
+          )
+          commented = (
+              "#ifdef CONFIG_SYSVIPC\n"
+              "\t// struct sysv_sem\t\t\tsysvsem;\n"
+              "\t// struct sysv_shm\t\t\tsysvshm;\n"
+              "#endif"
+          )
+          if "// struct sysv_sem" not in text:
+              text, n = fields_re.subn(commented, text, count=1)
+              if n != 1:
+                  sys.exit("CONFIG_SYSVIPC 字段不是预期形态，无法就地改写")
+          else:
+              print("SYSVIPC 原字段已是注释态，跳过")
+
+          # 2) 占用 KABI 预留槽位 6/7/8
+          reserve_re = re.compile(
+              r"\tANDROID_KABI_RESERVE\(6\);\n"
+              r"\tANDROID_KABI_RESERVE\(7\);\n"
+              r"\tANDROID_KABI_RESERVE\(8\);"
+          )
+          replacement = (
+              "#ifdef CONFIG_SYSVIPC\n"
+              "\tANDROID_KABI_USE(6, struct sysv_sem sysvsem);\n"
+              "\t_ANDROID_KABI_REPLACE(ANDROID_KABI_RESERVE(7); ANDROID_KABI_RESERVE(8), struct sysv_shm sysvshm);\n"
+              "#else\n"
+              "\tANDROID_KABI_RESERVE(6);\n"
+              "\tANDROID_KABI_RESERVE(7);\n"
+              "\tANDROID_KABI_RESERVE(8);\n"
+              "#endif"
+          )
+          if "ANDROID_KABI_USE(6," not in text:
+              text, n = reserve_re.subn(replacement, text, count=1)
+              if n != 1:
+                  sys.exit("ANDROID_KABI_RESERVE(6/7/8) 连续块未找到，槽位可能已被占用")
+          sched.write_text(text)
+          print("已就地改写 task_struct 的 SYSVIPC kABI 预留槽位 (6/7/8)")
+          PY
+            fi
+            grep -qF 'ANDROID_KABI_USE(6, struct sysv_sem sysvsem);' "$SCHED" \
+              || { echo "::error::SYSVIPC kABI 改写失败"; exit 1; }
+          fi
+
+          # ---------------- 3. 写入内核配置 ----------------
+          KIDX="${RUNNER_TEMP:-/tmp}/abk-kconfig-symbols-${KERNEL_VERSION}.txt"
+          if [ ! -s "$KIDX" ]; then
+            find "$COMMON_ROOT" -type f -name 'Kconfig*' -print0 |
+              { xargs -0 grep -hE '^[[:space:]]*(menuconfig|config)[[:space:]]+[A-Za-z0-9_]+' || true; } |
+              sed -E 's/^[[:space:]]*(menuconfig|config)[[:space:]]+([A-Za-z0-9_]+).*$/\2/' |
+              sort -u > "$KIDX"
+          fi
+          [ -s "$KIDX" ] || { echo "::error::无法建立 Kconfig 符号索引"; exit 1; }
+
+          enable_cfg() {
+            local cfg="${1#CONFIG}"
+            cfg="CONFIG${cfg}"
+            local name="${cfg#CONFIG_}"
+            if ! grep -qxF "$name" "$KIDX"; then
+              echo "  [skip] $name 未在当前内核定义"
+              return 0
+            fi
+            if grep -q "^${cfg}=y" "$DEFCONFIG_PATH"; then
+              echo "  [ok]   $cfg 已启用"
+            elif grep -q "^# ${cfg} is not set" "$DEFCONFIG_PATH"; then
+              sed -i "s/^# ${cfg} is not set$/${cfg}=y/" "$DEFCONFIG_PATH"
+              echo "  [on]   $cfg"
+            elif grep -q "^${cfg}=" "$DEFCONFIG_PATH"; then
+              sed -i "s/^${cfg}=.*$/${cfg}=y/" "$DEFCONFIG_PATH"
+              echo "  [on]   $cfg (覆盖原值)"
+            else
+              echo "${cfg}=y" >> "$DEFCONFIG_PATH"
+              echo "  [add]  $cfg"
+            fi
+          }
+
+          require_cfg() {
+            local cfg="$1"
+            local name="${cfg#CONFIG_}"
+            grep -qxF "$name" "$KIDX" || { echo "::error::当前内核未定义必要配置 $cfg"; exit 1; }
+            enable_cfg "$cfg"
+          }
+
+          echo "容器核心配置:"
+          require_cfg CONFIG_SYSVIPC
+          require_cfg CONFIG_POSIX_MQUEUE
+          require_cfg CONFIG_IPC_NS
+          require_cfg CONFIG_PID_NS
+          require_cfg CONFIG_DEVTMPFS
+
+          echo "容器可选配置:"
+          for c in CONFIG_NAMESPACES CONFIG_UTS_NS CONFIG_NET_NS CONFIG_USER_NS \
+                   CONFIG_CGROUPS CONFIG_CGROUP_DEVICE CONFIG_CGROUP_FREEZER CONFIG_MEMCG \
+                   CONFIG_MEMCG_SWAP CONFIG_SECCOMP CONFIG_SECCOMP_FILTER \
+                   CONFIG_VETH CONFIG_BRIDGE CONFIG_MACVLAN CONFIG_NF_TABLES \
+                   CONFIG_NETFILTER_XT_MATCH_ADDRTYPE CONFIG_IP6_NF_NAT \
+                   CONFIG_IP6_NF_TARGET_MASQUERADE CONFIG_IP_NF_TARGET_REJECT \
+                   CONFIG_IP6_NF_TARGET_REJECT CONFIG_NETFILTER_XT_TARGET_LOG \
+                   CONFIG_NETFILTER_XT_MATCH_RECENT CONFIG_IP_SET CONFIG_IP_SET_HASH_IP \
+                   CONFIG_IP_SET_HASH_NET CONFIG_NETFILTER_XT_SET \
+                   CONFIG_TMPFS_POSIX_ACL CONFIG_TMPFS_XATTR CONFIG_FANOTIFY; do
+            enable_cfg "$c"
+          done
+
+          echo "kexec 内核交接:"
+          for c in CONFIG_KEXEC CONFIG_KEXEC_FILE CONFIG_KEXEC_SIG CONFIG_CRYPTO_SHA256; do
+            enable_cfg "$c"
+          done
+
+          echo "文件系统补充:"
+          for c in CONFIG_XFS_FS CONFIG_NILFS2_FS CONFIG_NTFS3_FS CONFIG_BLK_DEV_NBD CONFIG_BLK_DEV_LOOP; do
+            enable_cfg "$c"
+          done
+
+          # 这两项会改变调度器与 cgroup 结构体布局，使数千个导出符号 CRC 失效，
+          # 厂商预编译模块将拒绝加载；除非整套 vendor_dlkm 一并重编，否则保持关闭。
+          for c in CONFIG_CFS_BANDWIDTH CONFIG_CGROUP_PIDS; do
+            name="${c#CONFIG_}"
+            if grep -qxF "$name" "$KIDX"; then
+              sed -i "s/^${c}=.*$/# ${c} is not set/" "$DEFCONFIG_PATH" 2>/dev/null || true
+              grep -q "^# ${c} is not set" "$DEFCONFIG_PATH" || echo "# ${c} is not set" >> "$DEFCONFIG_PATH"
+              echo "  [off]  $c (kABI 敏感，保持关闭)"
+            fi
+          done
+
+          echo "--- 注入结果 ---"
+          grep -nE '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|KEXEC|MACVLAN|BTRFS_FS)=' "$DEFCONFIG_PATH" || true
+
       - name: 修补宿主机工具 -Werror 告警
         shell: bash
         run: |
@@ -1358,4 +1565,32 @@ jobs:
         with:
           name: ${{ env.ONEPLUS_IMAGE_ARTIFACT_NAME }}_btrfs-ko
           path: oneplus_workspace/btrfs.ko
+          if-no-files-found: warn
+
+      - name: 导出 Module.symvers 与 System.map
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/oneplus_workspace/kernel_workspace/kernel_platform/common/out"
+          DEST="$GITHUB_WORKSPACE/oneplus_workspace/symbols"
+          mkdir -p "$DEST"
+          for f in Module.symvers System.map vmlinux; do
+            if [ -f "$OUT/$f" ]; then
+              cp "$OUT/$f" "$DEST/$f"
+              echo "已导出 $f ($(stat -c%s "$OUT/$f") bytes)"
+            else
+              echo "::warning::缺少 $f"
+            fi
+          done
+          if [ -f "$OUT/.config" ]; then
+            cp "$OUT/.config" "$DEST/config.final"
+            echo "--- 关键配置核对 ---"
+            grep -E '^CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPS|DEVTMPFS|USER_NS|KEXEC|KEXEC_FILE|MACVLAN|BTRFS_FS|KSU|KSU_SUSFS|CFS_BANDWIDTH|CGROUP_PIDS)=' "$OUT/.config" || true
+          fi
+
+      - name: 上传符号表
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.ONEPLUS_IMAGE_ARTIFACT_NAME }}_symbols
+          path: oneplus_workspace/symbols
           if-no-files-found: warn
